@@ -13,10 +13,12 @@ import burp.api.montoya.proxy.ProxyHttpRequestResponse;
 import burp.api.montoya.scanner.Scanner;
 import burp.api.montoya.scanner.audit.issues.*;
 import burp.api.montoya.sitemap.SiteMap;
+import burp.api.montoya.sitemap.SiteMapFilter;
 import burp.api.montoya.ui.UserInterface;
 import com.google.gson.*;
 
 import java.math.BigInteger;
+import java.lang.reflect.Method;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -31,6 +33,7 @@ public class BurpExtender implements BurpExtension {
     private Scanner scanner;
     private SiteMap siteMap;
     private UserInterface userInterface;
+    private Method siteMapDeleteMethod;
 
     @Override
     public void initialize(MontoyaApi api) {
@@ -40,6 +43,7 @@ public class BurpExtender implements BurpExtension {
         this.scanner = api.scanner();
         this.siteMap = api.siteMap();
         this.userInterface = api.userInterface();
+        this.siteMapDeleteMethod = resolveSiteMapDeleteMethod();
 
         api.extension().setName("BurpSuite Project File Parser");
 
@@ -48,11 +52,16 @@ public class BurpExtender implements BurpExtension {
 
         boolean proceed = false;
 
-        if (containsAny(args, "auditItems", "proxyHistory", "siteMap", "responseHeader", "responseBody")) {
+        if (containsAny(args, "auditItems", "proxyHistory", "siteMap", "responseHeader", "responseBody", "removeDomains")) {
             proceed = true;
         } else {
             logging.logToOutput("{\"Message\":\"No flags provided, assuming the initial load of extension.\"}");
             return;
+        }
+
+        List<String> domainsToRemove = extractArgumentValues(args, "removeDomains");
+        if (!domainsToRemove.isEmpty()) {
+            deleteDomainsFromSiteMap(domainsToRemove);
         }
 
         if (contains(args, "proxyHistory")) {
@@ -238,6 +247,71 @@ public class BurpExtender implements BurpExtension {
             }
         }
         return false;
+    }
+
+    private List<String> extractArgumentValues(String[] args, String key) {
+        List<String> values = new ArrayList<>();
+        String prefix = key + "=";
+        for (String arg : args) {
+            if (arg.startsWith(prefix)) {
+                String raw = arg.substring(prefix.length());
+                for (String part : raw.split(",")) {
+                    String trimmed = part.trim();
+                    if (!trimmed.isEmpty()) {
+                        values.add(trimmed);
+                    }
+                }
+            }
+        }
+        return values;
+    }
+
+    private void deleteDomainsFromSiteMap(List<String> domains) {
+        if (siteMapDeleteMethod == null) {
+            logging.logToError("Site map deletion is not supported by this Burp Suite version.");
+            return;
+        }
+
+        for (String domain : domains) {
+            SiteMapFilter httpFilter = SiteMapFilter.prefixFilter("http://" + domain);
+            SiteMapFilter httpsFilter = SiteMapFilter.prefixFilter("https://" + domain);
+
+            boolean deleted = false;
+            deleted |= invokeSiteMapDelete(httpFilter);
+            deleted |= invokeSiteMapDelete(httpsFilter);
+
+            if (deleted) {
+                logging.logToOutput("{\"Message\":\"Removed domain from site map\",\"Domain\":\"" + domain + "\"}");
+            } else {
+                logging.logToError("Failed to remove domain from site map: " + domain);
+            }
+        }
+    }
+
+    private Method resolveSiteMapDeleteMethod() {
+        try {
+            Method method = siteMap.getClass().getMethod("delete", SiteMapFilter.class);
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException e) {
+            return null;
+        } catch (Exception e) {
+            logging.logToError(e);
+        }
+        return null;
+    }
+
+    private boolean invokeSiteMapDelete(SiteMapFilter filter) {
+        if (filter == null) {
+            return false;
+        }
+        try {
+            siteMapDeleteMethod.invoke(siteMap, filter);
+            return true;
+        } catch (Exception e) {
+            logging.logToError(e);
+            return false;
+        }
     }
 
 }
